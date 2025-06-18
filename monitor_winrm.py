@@ -2,20 +2,24 @@ import winrm
 import json
 import getpass
 
-# Entrada interativa
-host = input("Digite o IP ou nome do servidor (ex: 172.210.225.172): ").strip()
-username = "eccovalue\\eccoadmin"
-password = getpass.getpass("Digite a senha para o usuário eccovalue\\eccoadmin: ")
+# Entradas interativas
+dominio = input("Digite o nome do domínio (ex: eccovalue): ").strip()
+host = input("Digite o nome ou IP do servidor (ex: 172.210.225.172): ").strip()
+usuario = input("Digite o nome do usuário (ex: eccoadmin): ").strip()
+senha = getpass.getpass("Digite a senha para o usuário: ")
 
-# Configurar sessão WinRM com segurança
+# Combina domínio + usuário
+username = f"{dominio}\\{usuario}"
+
+# Estabelece conexão via WinRM over HTTPS
 session = winrm.Session(
     f'https://{host}:5986',
-    auth=(username, password),
+    auth=(username, senha),
     transport='ntlm',
-    server_cert_validation='ignore'  # Ignorar certificado autoassinado (seguro em ambiente de teste)
+    server_cert_validation='ignore'
 )
 
-# Script PowerShell remoto
+# Script PowerShell remoto (métricas)
 ps_script = """
 $cpu = Get-Counter '\\Processor(_Total)\\% Processor Time' | Select -ExpandProperty CounterSamples | Select -ExpandProperty CookedValue;
 $ram = Get-WmiObject Win32_OperatingSystem | Select -ExpandProperty FreePhysicalMemory;
@@ -34,14 +38,14 @@ $result = [PSCustomObject]@{
 $result | ConvertTo-Json -Depth 3
 """
 
-# Executar o script remoto
-result = session.run_ps(ps_script)
-
-# Verificar resultado
-if result.status_code == 0:
-    output = result.std_out.decode('utf-8')
-    metrics = json.loads(output)
-    print(json.dumps(metrics, indent=2))
-else:
-    print("Erro:")
-    print(result.std_err.decode('utf-8'))
+# Executa e imprime resultado
+try:
+    result = session.run_ps(ps_script)
+    if result.status_code == 0:
+        metrics = json.loads(result.std_out.decode('utf-8'))
+        print(json.dumps(metrics, indent=2))
+    else:
+        print("Erro ao executar o script remoto:")
+        print(result.std_err.decode('utf-8'))
+except Exception as e:
+    print(f"Erro de conexão: {e}")
