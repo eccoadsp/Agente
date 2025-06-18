@@ -1,18 +1,22 @@
 import winrm
 import json
-import os
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-@app.route('/', methods=['GET'])
+@app.route('/', methods=['POST'])
 def coletar_metricas():
-
     try:
-        host = os.environ['WINRM_HOST']
-        dominio = os.environ['WINRM_DOMINIO']
-        usuario = os.environ['WINRM_USUARIO']
-        senha = os.environ['WINRM_SENHA']
+        data = request.get_json()
+
+        host = data.get("host")
+        dominio = data.get("dominio")
+        usuario = data.get("usuario")
+        senha = data.get("senha")
+
+        if not all([host, dominio, usuario, senha]):
+            return jsonify({"erro": "Parâmetros obrigatórios ausentes: host, dominio, usuario, senha."}), 400
+
         username = f"{dominio}\\{usuario}"
 
         session = winrm.Session(
