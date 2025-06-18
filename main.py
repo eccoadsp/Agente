@@ -1,57 +1,57 @@
-import winrm
-import json
+import os
 from flask import Flask, request, jsonify
+import winrm
+import getpass
 
 app = Flask(__name__)
 
-@app.route('/', methods=['POST'])
-def coletar_metricas():
+@app.route("/", methods=["POST"])
+def get_metrics():
     try:
+        # Parâmetros esperados via JSON
         data = request.get_json()
+        domain = data.get("domain")
+        hostname = data.get("hostname")
+        username = data.get("username")
+        password = data.get("password")
 
-        host = data.get("host")
-        dominio = data.get("dominio")
-        usuario = data.get("usuario")
-        senha = data.get("senha")
+        if not all([domain, hostname, username, password]):
+            return jsonify({"error": "Parâmetros ausentes"}), 400
 
-        if not all([host, dominio, usuario, senha]):
-            return jsonify({"erro": "Parâmetros obrigatórios ausentes: host, dominio, usuario, senha."}), 400
-
-        username = f"{dominio}\\{usuario}"
+        full_user = f"{domain}\\{username}"
 
         session = winrm.Session(
-            f'https://{host}:5986',
-            auth=(username, senha),
+            f"https://{hostname}:5986/wsman",
+            auth=(full_user, password),
             transport='ntlm',
             server_cert_validation='ignore'
         )
 
+        # PowerShell Script para coletar métricas
         ps_script = """
-        $cpu = Get-Counter '\\Processor(_Total)\\% Processor Time' | Select -ExpandProperty CounterSamples | Select -ExpandProperty CookedValue;
-        $ram = Get-WmiObject Win32_OperatingSystem | Select -ExpandProperty FreePhysicalMemory;
-        $disk = Get-WmiObject Win32_LogicalDisk -Filter "DriveType=3" | Select DeviceID,FreeSpace,Size;
-        $result = [PSCustomObject]@{
-          cpu_percent = [math]::Round($cpu, 2);
-          free_ram_mb = [math]::Round($ram / 1024, 2);
-          disks = $disk | ForEach-Object {
-            @{
-              drive = $_.DeviceID;
-              free_gb = [math]::Round($_.FreeSpace / 1GB, 2);
-              size_gb = [math]::Round($_.Size / 1GB, 2);
-            }
-          }
-        };
-        $result | ConvertTo-Json -Depth 3
+        $cpu = (Get-Counter '\\Processor(_Total)\\% Processor Time').CounterSamples.CookedValue
+        $ram = (Get-WmiObject Win32_OperatingSystem).FreePhysicalMemory
+        $disk = (Get-WmiObject Win32_LogicalDisk -Filter "DeviceID='C:'").FreeSpace
+        $totalDisk = (Get-WmiObject Win32_LogicalDisk -Filter "DeviceID='C:'").Size
+
+        $result = @{
+            CPU = [math]::Round($cpu,2)
+            RAM_Free_MB = [math]::Round($ram / 1024,2)
+            Disk_Free_GB = [math]::Round($disk / 1GB,2)
+            Disk_Total_GB = [math]::Round($totalDisk / 1GB,2)
+        }
+        $result | ConvertTo-Json
         """
 
         result = session.run_ps(ps_script)
 
-        if result.status_code == 0:
-            output = result.std_out.decode('utf-8')
-            metrics = json.loads(output)
-            return jsonify(metrics), 200
-        else:
-            return jsonify({"erro": result.std_err.decode('utf-8')}), 500
+        if result.status_code != 0:
+            return jsonify({"error": "Falha ao executar script remoto", "details": result.std_err.decode()}), 500
+
+        return jsonify({"metrics": result.std_out.decode().strip()})
 
     except Exception as e:
-        return jsonify({"erro": str(e)}), 500
+        return jsonify({"error": "Erro inesperado", "details": str(e)}), 500
+
+if __name__ == "__main__":
+    app.run(debug=False, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
