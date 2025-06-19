@@ -1,54 +1,73 @@
 import os
 from flask import Flask, request, jsonify
 import winrm
-import getpass
 
 app = Flask(__name__)
 
 @app.route("/", methods=["POST"])
 def get_metrics():
     try:
-        # Parâmetros esperados via JSON
         data = request.get_json()
-        domain = data.get("domain")
-        hostname = data.get("hostname")
-        username = data.get("username")
-        password = data.get("password")
+        servers = data.get("servers")
 
-        if not all([domain, hostname, username, password]):
-            return jsonify({"error": "Parâmetros ausentes"}), 400
+        if not servers or not isinstance(servers, list):
+            return jsonify({"error": "Parâmetro 'servers' ausente ou inválido."}), 400
 
-        full_user = f"{domain}\\{username}"
+        results = []
 
-        session = winrm.Session(
-            f"https://{hostname}:5986/wsman",
-            auth=(full_user, password),
-            transport='ntlm',
-            server_cert_validation='ignore'
-        )
+        for server in servers:
+            domain = server.get("domain")
+            hostname = server.get("hostname")
+            username = server.get("username")
+            password = server.get("password")
 
-        # PowerShell Script para coletar métricas
-        ps_script = """
-        $cpu = (Get-Counter '\\Processor(_Total)\\% Processor Time').CounterSamples.CookedValue
-        $ram = (Get-WmiObject Win32_OperatingSystem).FreePhysicalMemory
-        $disk = (Get-WmiObject Win32_LogicalDisk -Filter "DeviceID='C:'").FreeSpace
-        $totalDisk = (Get-WmiObject Win32_LogicalDisk -Filter "DeviceID='C:'").Size
+            if not all([domain, hostname, username, password]):
+                results.append({"hostname": hostname or "undefined", "error": "Parâmetros ausentes."})
+                continue
 
-        $result = @{
-            CPU = [math]::Round($cpu,2)
-            RAM_Free_MB = [math]::Round($ram / 1024,2)
-            Disk_Free_GB = [math]::Round($disk / 1GB,2)
-            Disk_Total_GB = [math]::Round($totalDisk / 1GB,2)
-        }
-        $result | ConvertTo-Json
-        """
+            full_user = f"{domain}\\{username}"
 
-        result = session.run_ps(ps_script)
+            try:
+                session = winrm.Session(
+                    f"https://{hostname}:5986/wsman",
+                    auth=(full_user, password),
+                    transport='ntlm',
+                    server_cert_validation='ignore'
+                )
 
-        if result.status_code != 0:
-            return jsonify({"error": "Falha ao executar script remoto", "details": result.std_err.decode()}), 500
+                ps_script = """
+                $cpu = (Get-Counter '\\Processor(_Total)\\% Processor Time').CounterSamples.CookedValue
+                $ram = (Get-WmiObject Win32_OperatingSystem).FreePhysicalMemory
+                $disk = (Get-WmiObject Win32_LogicalDisk -Filter \"DeviceID='C:'\").FreeSpace
+                $totalDisk = (Get-WmiObject Win32_LogicalDisk -Filter \"DeviceID='C:'\").Size
 
-        return jsonify({"metrics": result.std_out.decode().strip()})
+                $result = @{
+                    CPU = [math]::Round($cpu,2)
+                    RAM_Free_MB = [math]::Round($ram / 1024,2)
+                    Disk_Free_GB = [math]::Round($disk / 1GB,2)
+                    Disk_Total_GB = [math]::Round($totalDisk / 1GB,2)
+                }
+                $result | ConvertTo-Json
+                """
+
+                result = session.run_ps(ps_script)
+
+                if result.status_code != 0:
+                    results.append({
+                        "hostname": hostname,
+                        "error": "Erro na execução do script",
+                        "details": result.std_err.decode()
+                    })
+                else:
+                    results.append({
+                        "hostname": hostname,
+                        "metrics": result.std_out.decode().strip()
+                    })
+
+            except Exception as e:
+                results.append({"hostname": hostname, "error": str(e)})
+
+        return jsonify({"results": results})
 
     except Exception as e:
         return jsonify({"error": "Erro inesperado", "details": str(e)}), 500
