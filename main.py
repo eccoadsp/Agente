@@ -1,8 +1,12 @@
 import os
 from flask import Flask, request, jsonify
 import winrm
+from google.cloud import firestore
+from datetime import datetime, timezone, timedelta
+import pytz
 
 app = Flask(__name__)
+db = firestore.Client()
 
 @app.route("/", methods=["POST"])
 def get_metrics():
@@ -59,9 +63,29 @@ def get_metrics():
                         "details": result.std_err.decode()
                     })
                 else:
+                    metrics = result.std_out.decode().strip()
+                    try:
+                        metrics_json = eval(metrics)
+                        utc_now = datetime.now(timezone.utc)
+                        br_tz = pytz.timezone("America/Sao_Paulo")
+                        br_now = utc_now.astimezone(br_tz)
+
+                        # Salvar no Firestore
+                        doc_ref = db.collection("metricas").document(hostname).collection("registros").document()
+                        doc_ref.set({
+                            "timestamp": utc_now.isoformat(),
+                            "timestamp_br": br_now.strftime("%Y-%m-%d %H:%M:%S"),
+                            "cpu": metrics_json.get("CPU"),
+                            "ram_gb_livre": round(metrics_json.get("RAM_Free_MB", 0) / 1024, 2),
+                            "disco_gb_livre": metrics_json.get("Disk_Free_GB"),
+                            "disco_gb_total": metrics_json.get("Disk_Total_GB")
+                        })
+                    except Exception as e:
+                        pass
+
                     results.append({
                         "hostname": hostname,
-                        "metrics": result.std_out.decode().strip()
+                        "metrics": metrics
                     })
 
             except Exception as e:
