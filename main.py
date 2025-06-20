@@ -1,100 +1,93 @@
 import os
-from flask import Flask, request, jsonify
 import winrm
-from google.cloud import firestore
-from datetime import datetime, timezone, timedelta
 import pytz
+from flask import Flask, request, jsonify
+from datetime import datetime
+from google.cloud import firestore
 
 app = Flask(__name__)
 db = firestore.Client()
 
-@app.route("/", methods=["POST"])
-def get_metrics():
+def coletar_metricas(hostname, domain, username, password):
     try:
-        data = request.get_json()
-        servers = data.get("servers")
+        full_username = f"{domain}\\{username}"
+        session = winrm.Session(target=hostname,
+                                auth=(full_username, password),
+                                transport='ntlm',
+                                server_cert_validation='ignore')
 
-        if not servers or not isinstance(servers, list):
-            return jsonify({"error": "Parâmetro 'servers' ausente ou inválido."}), 400
+        ps_script = """
+        $cpu = (Get-Counter '\\Processor(_Total)\\% Processor Time').CounterSamples.CookedValue
+        $mem = Get-WmiObject Win32_OperatingSystem
+        $totalMem = $mem.TotalVisibleMemorySize
+        $freeMem = $mem.FreePhysicalMemory
+        $usedMemMB = [math]::Round(($totalMem - $freeMem) / 1024, 2)
 
-        results = []
+        $disks = Get-WmiObject Win32_LogicalDisk -Filter "DriveType=3" | ForEach-Object {
+            [PSCustomObject]@{
+                DeviceID = $_.DeviceID
+                SizeGB = [math]::Round($_.Size / 1GB, 2)
+                FreeGB = [math]::Round($_.FreeSpace / 1GB, 2)
+            }
+        }
 
-        for server in servers:
-            domain = server.get("domain")
-            hostname = server.get("hostname")
-            username = server.get("username")
-            password = server.get("password")
+        $result = [PSCustomObject]@{
+            CPU = [math]::Round($cpu, 2)
+            RAM_MB = $usedMemMB
+            Disks = $disks
+        }
 
-            if not all([domain, hostname, username, password]):
-                results.append({"hostname": hostname or "undefined", "error": "Parâmetros ausentes."})
-                continue
+        $result | ConvertTo-Json -Depth 3
+        """
+        response = session.run_ps(ps_script)
 
-            full_user = f"{domain}\\{username}"
+        if response.status_code != 0:
+            raise Exception(response.std_err.decode("utf-8"))
 
-            try:
-                session = winrm.Session(
-                    f"https://{hostname}:5986/wsman",
-                    auth=(full_user, password),
-                    transport='ntlm',
-                    server_cert_validation='ignore'
-                )
-
-                ps_script = """
-                $cpu = (Get-Counter '\\Processor(_Total)\\% Processor Time').CounterSamples.CookedValue
-                $ram = (Get-WmiObject Win32_OperatingSystem).FreePhysicalMemory
-                $disk = (Get-WmiObject Win32_LogicalDisk -Filter \"DeviceID='C:'\").FreeSpace
-                $totalDisk = (Get-WmiObject Win32_LogicalDisk -Filter \"DeviceID='C:'\").Size
-
-                $result = @{
-                    CPU = [math]::Round($cpu,2)
-                    RAM_Free_MB = [math]::Round($ram / 1024,2)
-                    Disk_Free_GB = [math]::Round($disk / 1GB,2)
-                    Disk_Total_GB = [math]::Round($totalDisk / 1GB,2)
-                }
-                $result | ConvertTo-Json
-                """
-
-                result = session.run_ps(ps_script)
-
-                if result.status_code != 0:
-                    results.append({
-                        "hostname": hostname,
-                        "error": "Erro na execução do script",
-                        "details": result.std_err.decode()
-                    })
-                else:
-                    metrics = result.std_out.decode().strip()
-                    try:
-                        metrics_json = eval(metrics)
-                        utc_now = datetime.now(timezone.utc)
-                        br_tz = pytz.timezone("America/Sao_Paulo")
-                        br_now = utc_now.astimezone(br_tz)
-
-                        # Salvar no Firestore
-                        doc_ref = db.collection("metricas").document(hostname).collection("registros").document()
-                        doc_ref.set({
-                            "timestamp": utc_now.isoformat(),
-                            "timestamp_br": br_now.strftime("%d-%m-%Y %H:%M:%S"),
-                            "cpu": metrics_json.get("CPU"),
-                            "ram_gb_livre": round(metrics_json.get("RAM_Free_MB", 0) / 1024, 2),
-                            "disco_gb_livre": metrics_json.get("Disk_Free_GB"),
-                            "disco_gb_total": metrics_json.get("Disk_Total_GB")
-                        })
-                    except Exception as e:
-                        pass
-
-                    results.append({
-                        "hostname": hostname,
-                        "metrics": metrics
-                    })
-
-            except Exception as e:
-                results.append({"hostname": hostname, "error": str(e)})
-
-        return jsonify({"results": results})
+        output = response.std_out.decode("utf-8")
+        return jsonify({"success": True, "hostname": hostname, "metrics": output})
 
     except Exception as e:
-        return jsonify({"error": "Erro inesperado", "details": str(e)}), 500
+        return jsonify({"success": False, "hostname": hostname, "error": str(e)})
+
+def gravar_firestore(registro):
+    timestamp_utc = datetime.utcnow().replace(tzinfo=pytz.utc)
+    br_tz = pytz.timezone("America/Sao_Paulo")
+    timestamp_brasil = timestamp_utc.astimezone(br_tz)
+
+    registro['timestamp_utc'] = timestamp_utc.isoformat()
+    registro['timestamp_brasil'] = timestamp_brasil.strftime("%d-%m-%Y %H:%M:%S")
+
+    db.collection("servidores-monitorados").add(registro)
+
+@app.route("/", methods=["POST"])
+def monitorar():
+    data = request.json
+    domain = data.get("domain")
+    username = data.get("username")
+    password = data.get("password")
+    servers = data.get("servers")
+
+    if not all([domain, username, password, servers]):
+        return jsonify({"success": False, "error": "Parâmetros ausentes"}), 400
+
+    resultados = []
+    for host in servers:
+        try:
+            result = coletar_metricas(host, domain, username, password)
+            json_result = result.get_json()
+
+            if json_result.get("success"):
+                gravar_firestore({
+                    "hostname": json_result.get("hostname"),
+                    "dados": json_result.get("metrics")
+                })
+
+            resultados.append(json_result)
+        except Exception as e:
+            resultados.append({"hostname": host, "success": False, "error": str(e)})
+
+    return jsonify(resultados)
 
 if __name__ == "__main__":
-    app.run(debug=False, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
