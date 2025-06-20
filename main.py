@@ -74,7 +74,7 @@ def get_metrics():
                         doc_ref = db.collection("metricas").document(hostname).collection("registros").document()
                         doc_ref.set({
                             "timestamp": utc_now.isoformat(),
-                            "timestamp_br": br_now.strftime("%Y-%m-%d %H:%M:%S"),
+                            "timestamp_br": br_now.strftime("%d-%m-%Y %H:%M:%S"),
                             "cpu": metrics_json.get("CPU"),
                             "ram_gb_livre": round(metrics_json.get("RAM_Free_MB", 0) / 1024, 2),
                             "disco_gb_livre": metrics_json.get("Disk_Free_GB"),
