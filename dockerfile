@@ -1,20 +1,20 @@
-# Imagem base
+# Use imagem oficial Python
 FROM python:3.11-slim
 
-# Diretório de trabalho
+# Define diretório de trabalho
 WORKDIR /app
 
-# Copia os arquivos
-COPY . .
-
-# Instala dependências
+# Copia o requirements.txt e instala as dependências
+COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Expõe a porta que o Cloud Run espera
+# Copia o restante do código
+COPY . .
+
+# Expõe a porta esperada pelo Cloud Run
+ENV PORT 8080
 EXPOSE 8080
 
-# Variável de ambiente padrão usada pelo Cloud Run
-ENV PORT=8080
+# Usa gunicorn para rodar a app Flask
+CMD exec gunicorn --bind :$PORT main:app
 
-# Comando de inicialização
-CMD ["python", "main.py"]
