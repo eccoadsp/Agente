@@ -6,65 +6,9 @@ from datetime import datetime
 from google.cloud import firestore
 
 app = Flask(__name__)
-db = None  # adiado para depois do startup
+db = firestore.Client()
 
-def coletar_metricas(hostname, domain, username, password):
-    try:
-        full_username = f"{domain}\\{username}"
-        session = winrm.Session(target=hostname,
-                                auth=(full_username, password),
-                                transport='ntlm',
-                                server_cert_validation='ignore')
-
-        ps_script = """
-        $cpu = (Get-Counter '\\Processor(_Total)\\% Processor Time').CounterSamples.CookedValue
-        $mem = Get-WmiObject Win32_OperatingSystem
-        $totalMem = $mem.TotalVisibleMemorySize
-        $freeMem = $mem.FreePhysicalMemory
-        $usedMemMB = [math]::Round(($totalMem - $freeMem) / 1024, 2)
-
-        $disks = Get-WmiObject Win32_LogicalDisk -Filter "DriveType=3" | ForEach-Object {
-            [PSCustomObject]@{
-                DeviceID = $_.DeviceID
-                SizeGB = [math]::Round($_.Size / 1GB, 2)
-                FreeGB = [math]::Round($_.FreeSpace / 1GB, 2)
-            }
-        }
-
-        $result = [PSCustomObject]@{
-            CPU = [math]::Round($cpu, 2)
-            RAM_MB = $usedMemMB
-            Disks = $disks
-        }
-
-        $result | ConvertTo-Json -Depth 3
-        """
-        response = session.run_ps(ps_script)
-
-        if response.status_code != 0:
-            raise Exception(response.std_err.decode("utf-8"))
-
-        output = response.std_out.decode("utf-8")
-        return jsonify({"success": True, "hostname": hostname, "metrics": output})
-
-    except Exception as e:
-        return jsonify({"success": False, "hostname": hostname, "error": str(e)})
-
-def gravar_firestore(registro):
-    global db
-    if db is None:
-        db = firestore.Client()
-
-    timestamp_utc = datetime.utcnow().replace(tzinfo=pytz.utc)
-    br_tz = pytz.timezone("America/Sao_Paulo")
-    timestamp_brasil = timestamp_utc.astimezone(br_tz)
-
-    registro['timestamp_utc'] = timestamp_utc.isoformat()
-    registro['timestamp_brasil'] = timestamp_brasil.strftime("%d-%m-%Y %H:%M:%S")
-
-    db.collection("servidores-monitorados").add(registro)
-
-@app.route("/", methods=["POST"])
+@app.route('/', methods=['POST'])
 def monitorar():
     data = request.json
     domain = data.get("domain")
@@ -78,18 +22,52 @@ def monitorar():
     resultados = []
     for host in servers:
         try:
-            result = coletar_metricas(host, domain, username, password)
-            json_result = result.get_json()
+            full_username = f"{domain}\\{username}"
+            session = winrm.Session(target=host, auth=(full_username, password), transport='ntlm', server_cert_validation='ignore')
 
-            if json_result.get("success"):
-                gravar_firestore({
-                    "hostname": json_result.get("hostname"),
-                    "dados": json_result.get("metrics")
-                })
+            ps_script = """
+            $cpu = (Get-Counter '\Processor(_Total)\% Processor Time').CounterSamples.CookedValue
+            $mem = Get-WmiObject Win32_OperatingSystem
+            $freeMemMB = [math]::Round($mem.FreePhysicalMemory / 1024, 2)
 
-            resultados.append(json_result)
+            $disco = Get-WmiObject Win32_LogicalDisk -Filter "DeviceID='C:'"
+            $totalGB = [math]::Round($disco.Size / 1GB, 2)
+            $livreGB = [math]::Round($disco.FreeSpace / 1GB, 2)
+            $percentLivre = [math]::Round(($livreGB / $totalGB) * 100, 2)
+
+            $obj = [PSCustomObject]@{
+                CPU = [math]::Round($cpu, 2)
+                RAM_Livre_GB = $freeMemMB / 1024
+                Disco_Total_GB = $totalGB
+                Disco_Livre_GB = $livreGB
+                Disco_Livre_Porcentagem = $percentLivre
+            }
+            $obj | ConvertTo-Json -Depth 2
+            """
+
+            result = session.run_ps(ps_script)
+            output = result.std_out.decode("utf-8")
+            metrics = eval(output) if output else {}
+            now_utc = datetime.utcnow().replace(tzinfo=pytz.utc)
+            now_brt = now_utc.astimezone(pytz.timezone('America/Sao_Paulo'))
+
+            registro = {
+                "servidor": host,
+                "dominio": domain,
+                "usuario": username,
+                "coletado_em_utc": now_utc.isoformat(),
+                "coletado_em_brt": now_brt.strftime('%d/%m/%Y %H:%M:%S'),
+                "cpu": metrics.get("CPU"),
+                "ram_gb_livre": metrics.get("RAM_Livre_GB"),
+                "disco_total_gb": metrics.get("Disco_Total_GB"),
+                "disco_gb_livre": metrics.get("Disco_Livre_GB"),
+                "disco_percent_livre": metrics.get("Disco_Livre_Porcentagem")
+            }
+            db.collection("metricas").add(registro)
+            resultados.append({"success": True, "hostname": host, "metrics": registro})
+
         except Exception as e:
-            resultados.append({"hostname": host, "success": False, "error": str(e)})
+            resultados.append({"success": False, "hostname": host, "error": str(e)})
 
     return jsonify(resultados)
 
