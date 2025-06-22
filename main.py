@@ -37,6 +37,7 @@ def monitorar():
                 auth=(full_username, password),
                 transport='ntlm',
                 server_cert_validation='ignore'
+            endpoint=f"https://{host}:5986/wsman"   
             )
 
             ps_script = """
