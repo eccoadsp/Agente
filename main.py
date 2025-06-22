@@ -6,7 +6,7 @@ from datetime import datetime
 from google.cloud import firestore
 
 app = Flask(__name__)
-db = firestore.Client()
+db = None  # adiado para depois do startup
 
 def coletar_metricas(hostname, domain, username, password):
     try:
@@ -51,6 +51,10 @@ def coletar_metricas(hostname, domain, username, password):
         return jsonify({"success": False, "hostname": hostname, "error": str(e)})
 
 def gravar_firestore(registro):
+    global db
+    if db is None:
+        db = firestore.Client()
+
     timestamp_utc = datetime.utcnow().replace(tzinfo=pytz.utc)
     br_tz = pytz.timezone("America/Sao_Paulo")
     timestamp_brasil = timestamp_utc.astimezone(br_tz)
