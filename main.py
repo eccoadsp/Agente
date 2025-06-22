@@ -4,21 +4,14 @@ import pytz
 import logging
 from flask import Flask, request, jsonify
 from datetime import datetime
-
-try:
-    from google.cloud import firestore
-    firestore_available = True
-except Exception as e:
-    firestore_available = False
-    logging.error(f"Firestore import failed: {e}")
+from google.cloud import firestore
+from winrm.protocol import Protocol
 
 app = Flask(__name__)
-db = None
+db = firestore.Client()
 
 @app.route('/', methods=['POST'])
 def monitorar():
-    global db
-
     data = request.json
     domain = data.get("domain")
     username = data.get("username")
@@ -32,13 +25,19 @@ def monitorar():
     for host in servers:
         try:
             full_username = f"{domain}\\{username}"
-            session = winrm.Session(
-                target=host,
-                auth=(full_username, password),
+            endpoint = f"https://{host}:5986/wsman"
+
+            protocol = Protocol(
+                endpoint=endpoint,
                 transport='ntlm',
-                server_cert_validation='ignore'
-            endpoint=f"https://{host}:5986/wsman"   
+                username=full_username,
+                password=password,
+                server_cert_validation='ignore',
+                read_timeout_sec=20,
+                operation_timeout_sec=10
             )
+
+            session = winrm.Session(None, protocol=protocol)
 
             ps_script = """
             $cpu = (Get-Counter '\Processor(_Total)\% Processor Time').CounterSamples.CookedValue
@@ -79,13 +78,10 @@ def monitorar():
                 "disco_percent_livre": metrics.get("Disco_Livre_Porcentagem")
             }
 
-            if firestore_available:
-                try:
-                    if db is None:
-                        db = firestore.Client()
-                    db.collection("metricas").add(registro)
-                except Exception as db_err:
-                    registro["firestore_error"] = str(db_err)
+            try:
+                db.collection("metricas").add(registro)
+            except Exception as db_err:
+                registro["firestore_error"] = str(db_err)
 
             resultados.append({"success": True, "hostname": host, "metrics": registro})
 
