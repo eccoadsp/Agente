@@ -1,0 +1,52 @@
+openapi: 3.1.0
+info:
+  title: Consulta de Métricas via WinRM
+  version: 1.0.0
+paths:
+  /:
+    post:
+      operationId: consultarMetricas
+      summary: Consulta métricas de servidores Windows via WinRM
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - domain
+                - username
+                - password
+                - servers
+              properties:
+                domain:
+                  type: string
+                  description: Domínio do servidor
+                username:
+                  type: string
+                  description: Nome de usuário com permissão no servidor
+                password:
+                  type: string
+                  description: Senha do usuário
+                  x-sensitive: true
+                servers:
+                  type: array
+                  description: Lista de servidores (IP ou hostname)
+                  items:
+                    type: string
+      responses:
+        '200':
+          description: Resposta bem-sucedida
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  hostname:
+                    type: string
+                  success:
+                    type: boolean
+                  metrics:
+                    type: string
+                  error:
+                    type: string
