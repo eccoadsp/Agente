@@ -1,1 +1,1 @@
-"# Commit de teste para acionar CI/CD Dev" 
+"# Commit de teste v0.0.2 - inicio esteira completa" 
