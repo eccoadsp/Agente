@@ -1,0 +1,22 @@
+name: Deploy to Cloud Run - Dev
+on:
+  push:
+    branches:
+      - dev
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+      - name: Authenticate with Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_DEV_SA_KEY }}
+      - name: Setup gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ecco-agent-gcp
+      - name: Deploy to Cloud Run (Dev)
+        run: |
+          gcloud run deploy winrm-metrics-dev             --source .             --region southamerica-east1             --platform managed             --allow-unauthenticated             --service-account=ecco-agent-gcp@appspot.gserviceaccount.com
