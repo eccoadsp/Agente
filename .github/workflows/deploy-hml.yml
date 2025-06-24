@@ -1,9 +1,9 @@
-name: Deploy to Cloud Run - Dev
+name: Deploy to Cloud Run - HML
 
 on:
   push:
     branches:
-      - dev
+      - hml
 
 jobs:
   deploy:
@@ -16,13 +16,13 @@ jobs:
       - name: Autenticação com o Google Cloud
         uses: google-github-actions/auth@v1
         with:
-          credentials_json: '${{ secrets.GCP_DEV_SA_KEY }}'
+          credentials_json: '${{ secrets.GCP_HML_SA_KEY }}'
 
       - name: Configurar gcloud
         uses: google-github-actions/setup-gcloud@v1
         with:
-          project_id: ecco-agent-dev
+          project_id: ecco-agent-hml
           install_components: gcloud
 
       - name: Fazer deploy no Cloud Run
-        run: gcloud run deploy winrm-metrics-dev --source . --region southamerica-east1 --platform managed --allow-unauthenticated --service-account=agent-dev@ecco-agent-dev.iam.gserviceaccount.com
+        run: gcloud run deploy winrm-metrics-hml --source . --region southamerica-east1 --platform managed --allow-unauthenticated --service-account=agent-hml@ecco-agent-hml.iam.gserviceaccount.com
