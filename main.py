@@ -5,7 +5,6 @@ import logging
 from flask import Flask, request, jsonify
 from datetime import datetime
 from google.cloud import firestore
-from winrm.protocol import Protocol
 
 app = Flask(__name__)
 db = firestore.Client()
@@ -25,19 +24,14 @@ def monitorar():
     for host in servers:
         try:
             full_username = f"{domain}\\{username}"
-            endpoint = f"https://{host}:5986/wsman"
+            target = f"https://{host}:5986/wsman"
 
-            protocol = Protocol(
-                endpoint=endpoint,
+            session = winrm.Session(
+                target=target,
+                auth=(full_username, password),
                 transport='ntlm',
-                username=full_username,
-                password=password,
-                server_cert_validation='ignore',
-                read_timeout_sec=20,
-                operation_timeout_sec=10
+                server_cert_validation='ignore'
             )
-
-            session = winrm.Session(None, protocol=protocol)
 
             ps_script = """
             $cpu = (Get-Counter '\Processor(_Total)\% Processor Time').CounterSamples.CookedValue
@@ -86,7 +80,14 @@ def monitorar():
             resultados.append({"success": True, "hostname": host, "metrics": registro})
 
         except Exception as e:
-            resultados.append({"success": False, "hostname": host, "error": str(e)})
+            import traceback
+            erro_completo = traceback.format_exc()
+            resultados.append({
+                "success": False,
+                "hostname": host,
+                "error": str(e),
+                "trace": erro_completo
+            })
 
     return jsonify(resultados)
 
