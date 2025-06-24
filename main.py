@@ -1,99 +1,97 @@
 import os
-import winrm
-import pytz
-import logging
+import json
+from datetime import datetime, timezone, timedelta
 from flask import Flask, request, jsonify
-from datetime import datetime
-from google.cloud import firestore
+import winrm
+from google.cloud import bigquery
 
 app = Flask(__name__)
-db = firestore.Client()
+bq_client = bigquery.Client()
 
-@app.route('/', methods=['POST'])
+@app.route("/", methods=["GET"])
+def index():
+    return "OK"
+
+@app.route("/", methods=["POST"])
 def monitorar():
-    data = request.json
-    domain = data.get("domain")
-    username = data.get("username")
-    password = data.get("password")
-    servers = data.get("servers")
+    dados = request.get_json()
+    if not dados:
+        return jsonify({"erro": "Requisição inválida. Dados ausentes."}), 400
+
+    domain = dados.get("domain")
+    username = dados.get("username")
+    password = dados.get("password")
+    servers = dados.get("servers")
 
     if not all([domain, username, password, servers]):
-        return jsonify({"success": False, "error": "Parâmetros ausentes"}), 400
+        return jsonify({"erro": "Parâmetros 'domain', 'username', 'password' e 'servers' são obrigatórios."}), 400
 
     resultados = []
+
     for host in servers:
         try:
-            full_username = f"{domain}\\{username}"
-            target = f"https://{host}:5986/wsman"
-
             session = winrm.Session(
-                target=target,
-                auth=(full_username, password),
-                transport='ntlm',
-                server_cert_validation='ignore'
+                target=host,
+                auth=(f"{domain}\\{username}", password),
+                transport="ntlm",
+                server_cert_validation="ignore",
             )
 
-            ps_script = """
-            $cpu = (Get-Counter '\Processor(_Total)\% Processor Time').CounterSamples.CookedValue
-            $mem = Get-WmiObject Win32_OperatingSystem
-            $freeMemMB = [math]::Round($mem.FreePhysicalMemory / 1024, 2)
-
-            $disco = Get-WmiObject Win32_LogicalDisk -Filter "DeviceID='C:'"
-            $totalGB = [math]::Round($disco.Size / 1GB, 2)
-            $livreGB = [math]::Round($disco.FreeSpace / 1GB, 2)
-            $percentLivre = [math]::Round(($livreGB / $totalGB) * 100, 2)
-
-            $obj = [PSCustomObject]@{
-                CPU = [math]::Round($cpu, 2)
-                RAM_Livre_GB = $freeMemMB / 1024
-                Disco_Total_GB = $totalGB
-                Disco_Livre_GB = $livreGB
-                Disco_Livre_Porcentagem = $percentLivre
-            }
-            $obj | ConvertTo-Json -Depth 2
+            ps_script = r"""
+            $cpu = (Get-Counter '\Processor(_Total)\% Processor Time').CounterSamples[0].CookedValue
+            $mem = (Get-WmiObject Win32_OperatingSystem).FreePhysicalMemory
+            $disk = Get-WmiObject Win32_LogicalDisk -Filter "DeviceID='C:'"
+            $totalDisk = [math]::Round($disk.Size / 1GB, 2)
+            $freeDisk = [math]::Round($disk.FreeSpace / 1GB, 2)
+            $freeDiskPercent = [math]::Round(($disk.FreeSpace / $disk.Size) * 100, 2)
+            $cpu = [math]::Round($cpu, 2)
+            $ram = [math]::Round($mem / 1024 / 1024, 2)
+            [PSCustomObject]@{
+                CPU = $cpu
+                RAM_Livre_GB = $ram
+                Disco_Total_GB = $totalDisk
+                Disco_Livre_GB = $freeDisk
+                Disco_Livre_Porcentagem = $freeDiskPercent
+            } | ConvertTo-Json -Compress
             """
 
             result = session.run_ps(ps_script)
-            output = result.std_out.decode("utf-8")
-            metrics = eval(output) if output else {}
-            now_utc = datetime.utcnow().replace(tzinfo=pytz.utc)
-            now_brt = now_utc.astimezone(pytz.timezone('America/Sao_Paulo'))
+
+            if result.status_code != 0:
+                raise Exception(f"Erro ao executar script: {result.std_err.decode()}")
+
+            metrics = json.loads(result.std_out.decode())
+            now_utc = datetime.now(timezone.utc)
+            now_brt = now_utc.astimezone(timezone(timedelta(hours=-3)))
 
             registro = {
-                "servidor": host,
-                "dominio": domain,
-                "usuario": username,
-                "coletado_em_utc": now_utc.isoformat(),
-                "coletado_em_brt": now_brt.strftime('%d/%m/%Y %H:%M:%S'),
+                "hostname": host,
                 "cpu": metrics.get("CPU"),
-                "ram_gb_livre": metrics.get("RAM_Livre_GB"),
-                "disco_total_gb": metrics.get("Disco_Total_GB"),
-                "disco_gb_livre": metrics.get("Disco_Livre_GB"),
-                "disco_percent_livre": metrics.get("Disco_Livre_Porcentagem")
+                "ram": metrics.get("RAM_Livre_GB"),
+                "disco_livre": metrics.get("Disco_Livre_GB"),
+                "disco_total": metrics.get("Disco_Total_GB"),
+                "disco_percentual_livre": metrics.get("Disco_Livre_Porcentagem"),
+                "status": "OK",
+                "timestamp_utc": now_utc,
+                "timestamp_brasil": now_brt.strftime('%d/%m/%Y %H:%M:%S'),
             }
 
             try:
-                db.collection("metricas").add(registro)
-            except Exception as db_err:
-                registro["firestore_error"] = str(db_err)
+                table_id = "ecco-agent-dev.monitoramento.metricas_servidor"
+                bq_client.insert_rows_json(table_id, [registro])
+            except Exception as bq_err:
+                registro["bigquery_error"] = str(bq_err)
 
-            resultados.append({"success": True, "hostname": host, "metrics": registro})
+            resultados.append({"hostname": host, "success": True, "metrics": registro})
 
-        except Exception as e:
-            import traceback
-            erro_completo = traceback.format_exc()
+        except Exception as erro:
             resultados.append({
-                "success": False,
                 "hostname": host,
-                "error": str(e),
-                "trace": erro_completo
+                "success": False,
+                "error": str(erro)
             })
 
     return jsonify(resultados)
-
-@app.route('/', methods=['GET'])
-def health():
-    return 'OK', 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
