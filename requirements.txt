@@ -1,7 +1,7 @@
 flask==2.3.3
 gunicorn==21.2.0
 requests==2.31.0
-pywinrm[credssp,kerberos,ntlm]==0.4.3
+pywinrm[credssp]==0.4.3
 google-cloud-bigquery==3.17.2
 google-cloud-firestore==2.14.0
 google-auth==2.29.0
