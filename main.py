@@ -3,10 +3,13 @@ import winrm
 import pytz
 import logging
 from flask import Flask, request, jsonify
+from google.cloud import firestore
 from datetime import datetime
 from google.cloud import firestore, bigquery
 
 app = Flask(__name__)
+firestore_client = firestore.Client()
+
 db = firestore.Client()
 bq_client = bigquery.Client()
 
