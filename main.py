@@ -1,124 +1,128 @@
+
 import os
+import json
+from flask import Flask, request
 import winrm
-import pytz
-import logging
-from flask import Flask, request, jsonify
-from google.cloud import firestore
 from datetime import datetime
-from google.cloud import firestore, bigquery
+import pytz
+from google.cloud import firestore
+from google.cloud import bigquery
 
 app = Flask(__name__)
-firestore_client = firestore.Client()
 
-db = firestore.Client()
-bq_client = bigquery.Client()
+def coletar_metricas(hostname, dominio, usuario, senha):
+    try:
+        sessao = winrm.Session(
+            target=hostname,
+            auth=(f"{dominio}\\{usuario}", senha),
+            transport='ntlm',
+            server_cert_validation='ignore',
+            read_timeout_sec=30,
+            operation_timeout_sec=30
+        )
 
-@app.route('/', methods=['POST'])
-def monitorar():
-    data = request.json
-    domain = data.get("domain")
-    username = data.get("username")
-    password = data.get("password")
-    servers = data.get("servers")
+        script = '''
+        $cpu = Get-Counter '\\Processor(_Total)\\% Processor Time'
+        $ram = Get-CimInstance Win32_OperatingSystem
+        $disco = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+        $resultado = [PSCustomObject]@{
+            cpu = [math]::Round($cpu.CounterSamples.CookedValue, 2)
+            ram_gb_livre = [math]::Round($ram.FreePhysicalMemory / 1MB, 2)
+            disco_total_gb = [math]::Round($disco.Size / 1GB, 2)
+            disco_gb_livre = [math]::Round($disco.FreeSpace / 1GB, 2)
+        }
+        $resultado | ConvertTo-Json -Compress
+        '''
 
-    if not all([domain, username, password, servers]):
-        return jsonify({"success": False, "error": "Parâmetros ausentes"}), 400
+        resultado = sessao.run_ps(script)
+        if resultado.status_code != 0:
+            return {"error": resultado.std_err.decode(), "success": False}
+
+        dados = json.loads(resultado.std_out.decode())
+        disco_total = dados["disco_total_gb"]
+        disco_livre = dados["disco_gb_livre"]
+        disco_percent_livre = round((disco_livre / disco_total) * 100, 2) if disco_total else 0
+
+        utc_now = datetime.utcnow().replace(tzinfo=pytz.utc)
+        brasil = utc_now.astimezone(pytz.timezone("America/Sao_Paulo"))
+
+        return {
+            "hostname": hostname,
+            "cpu": dados["cpu"],
+            "ram_gb_livre": dados["ram_gb_livre"],
+            "disco_total_gb": disco_total,
+            "disco_gb_livre": disco_livre,
+            "disco_percent_livre": disco_percent_livre,
+            "coletado_em_utc": utc_now.isoformat(),
+            "coletado_em_brt": brasil.strftime("%d/%m/%Y %H:%M:%S"),
+            "dominio": dominio,
+            "usuario": usuario,
+            "success": True
+        }
+
+    except Exception as e:
+        return {"hostname": hostname, "error": str(e), "success": False}
+
+@app.route("/", methods=["POST"])
+def main():
+    dados = request.get_json()
+    dominio = dados.get("domain")
+    usuario = dados.get("username")
+    senha = dados.get("password")
+    servidores = dados.get("servers", [])
 
     resultados = []
-    for host in servers:
+    firestore_erro = ""
+    bigquery_erro = ""
+
+    project_id = os.environ.get("GOOGLE_CLOUD_PROJECT")
+    table_id = os.environ.get("BIGQUERY_TABLE_ID")
+
+    db = None
+    if project_id:
         try:
-            full_username = f"{domain}\\{username}"
-            target = f"https://{host}:5986/wsman"
-
-            session = winrm.Session(
-                target=target,
-                auth=(full_username, password),
-                transport='ntlm',
-                server_cert_validation='ignore'
-            )
-
-            ps_script = """
-            $cpu = (Get-Counter '\\Processor(_Total)\\% Processor Time').CounterSamples.CookedValue
-            $mem = Get-WmiObject Win32_OperatingSystem
-            $freeMemMB = [math]::Round($mem.FreePhysicalMemory / 1024, 2)
-
-            $disco = Get-WmiObject Win32_LogicalDisk -Filter "DeviceID='C:'"
-            $totalGB = [math]::Round($disco.Size / 1GB, 2)
-            $livreGB = [math]::Round($disco.FreeSpace / 1GB, 2)
-            $percentLivre = [math]::Round(($livreGB / $totalGB) * 100, 2)
-
-            $obj = [PSCustomObject]@{
-                CPU = [math]::Round($cpu, 2)
-                RAM_Livre_GB = $freeMemMB / 1024
-                Disco_Total_GB = $totalGB
-                Disco_Livre_GB = $livreGB
-                Disco_Livre_Porcentagem = $percentLivre
-            }
-            $obj | ConvertTo-Json -Depth 2
-            """
-
-            result = session.run_ps(ps_script)
-            output = result.std_out.decode("utf-8")
-            metrics = eval(output) if output else {}
-            now_utc = datetime.utcnow().replace(tzinfo=pytz.utc)
-            now_brt = now_utc.astimezone(pytz.timezone('America/Sao_Paulo'))
-
-            registro = {
-                "servidor": host,
-                "dominio": domain,
-                "usuario": username,
-                "coletado_em_utc": now_utc.isoformat(),
-                "coletado_em_brt": now_brt.strftime('%d/%m/%Y %H:%M:%S'),
-                "cpu": metrics.get("CPU"),
-                "ram_gb_livre": metrics.get("RAM_Livre_GB"),
-                "disco_total_gb": metrics.get("Disco_Total_GB"),
-                "disco_gb_livre": metrics.get("Disco_Livre_GB"),
-                "disco_percent_livre": metrics.get("Disco_Livre_Porcentagem")
-            }
-
-            try:
-                db.collection("metricas").add(registro)
-            except Exception as db_err:
-                registro["firestore_error"] = str(db_err)
-
-            try:
-                table_id = os.environ.get("BIGQUERY_TABLE_ID")
-                if table_id:
-                    row = {
-                        "servidor": host,
-                        "dominio": domain,
-                        "usuario": username,
-                        "coletado_em_utc": now_utc.isoformat(),
-                        "coletado_em_brt": now_brt.strftime('%Y-%m-%d %H:%M:%S'),
-                        "cpu": metrics.get("CPU"),
-                        "ram_gb_livre": metrics.get("RAM_Livre_GB"),
-                        "disco_total_gb": metrics.get("Disco_Total_GB"),
-                        "disco_gb_livre": metrics.get("Disco_Livre_GB"),
-                        "disco_percent_livre": metrics.get("Disco_Livre_Porcentagem")
-                    }
-                    errors = bq_client.insert_rows_json(table_id, [row])
-                    if errors:
-                        registro["bigquery_error"] = errors
-            except Exception as bq_err:
-                registro["bigquery_exception"] = str(bq_err)
-
-            resultados.append({"success": True, "hostname": host, "metrics": registro})
-
+            db = firestore.Client(project=project_id)
         except Exception as e:
-            import traceback
-            erro_completo = traceback.format_exc()
-            resultados.append({
-                "success": False,
-                "hostname": host,
-                "error": str(e),
-                "trace": erro_completo
-            })
+            firestore_erro = str(e)
 
-    return jsonify(resultados)
+    bq_client = None
+    if table_id:
+        try:
+            bq_client = bigquery.Client()
+        except Exception as e:
+            bigquery_erro = str(e)
 
-@app.route('/', methods=['GET'])
-def health():
-    return 'OK', 200
+    for servidor in servidores:
+        metricas = coletar_metricas(servidor, dominio, usuario, senha)
+
+        if db:
+            try:
+                db.collection("metricas_servidor").add(metricas)
+            except Exception as e:
+                metricas["firestore_error"] = str(e) or firestore_erro
+
+        if bq_client and table_id:
+            try:
+                row = {
+                    "hostname": servidor,
+                    "cpu": metricas.get("cpu"),
+                    "ram": metricas.get("ram_gb_livre"),
+                    "disco_livre": metricas.get("disco_gb_livre"),
+                    "disco_total": metricas.get("disco_total_gb"),
+                    "disco_percentual_livre": metricas.get("disco_percent_livre"),
+                    "status": "OK" if metricas.get("success") else "ERRO",
+                    "timestamp_utc": datetime.utcnow().isoformat(),
+                    "timestamp_brasil": datetime.now(pytz.timezone("America/Sao_Paulo")).strftime("%d/%m/%Y %H:%M:%S")
+                }
+                errors = bq_client.insert_rows_json(table_id, [row])
+                if errors:
+                    metricas["bigquery_error"] = errors
+            except Exception as e:
+                metricas["bigquery_error"] = str(e) or bigquery_erro
+
+        resultados.append(metricas)
+
+    return json.dumps(resultados)
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+    app.run(debug=True)
