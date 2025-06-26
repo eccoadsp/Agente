@@ -114,16 +114,16 @@ def monitorar():
                 table_id = os.environ.get("BIGQUERY_TABLE_ID")
                 if table_id:
                     row = {
-                        "servidor": host,
-                        "dominio": domain,
-                        "usuario": username,
-                        "coletado_em_utc": now_utc.isoformat(),
-                        "coletado_em_brt": now_brt.strftime('%Y-%m-%d %H:%M:%S'),
+                        "hostname": host,
                         "cpu": metrics.get("CPU"),
-                        "ram_gb_livre": metrics.get("RAM_Livre_GB"),
-                        "disco_total_gb": metrics.get("Disco_Total_GB"),
-                        "disco_gb_livre": metrics.get("Disco_Livre_GB"),
-                        "disco_percent_livre": metrics.get("Disco_Livre_Porcentagem")
+                        "ram": metrics.get("RAM_Livre_GB"),
+                        "disco_livre": metrics.get("Disco_Livre_GB"),
+                        "disco_total": metrics.get("Disco_Total_GB"),
+                        "disco_percentual_livre": metrics.get("Disco_Livre_Porcentagem"),
+                        "status": "OK",
+                        "timestamp_utc": now_utc.isoformat(),
+                        "timestamp_brasil": now_brt.strftime('%Y-%m-%d %H:%M:%S'),
+                        "coletado_em_brt": now_brt.strftime('%d/%m/%Y %H:%M:%S')
                     }
                     errors = bq_client.insert_rows_json(table_id, [row])
                     if errors:
