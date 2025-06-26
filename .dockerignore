@@ -1,0 +1,16 @@
+# Ignora arquivos e pastas que não são necessários no container
+*.log
+*.key
+*.json
+__pycache__/
+*.pyc
+.env
+.vscode/
+.idea/
+.DS_Store
+.gcloudignore
+.gitattributes
+.gitignore
+.git/
+tests/
+*.md
