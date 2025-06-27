@@ -9,14 +9,16 @@ import winrm
 import pytz
 import logging
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from google.cloud import firestore
 from datetime import datetime
 from google.cloud import firestore, bigquery
 
 # Inicialização do Flask e dos clientes do Firestore e BigQuery
 
-# Inicia a aplicação Flask
+# Inicia a aplicação Flask e CORS para permitir requisições de outros domínios.
 app = Flask(__name__)
+CORS(app)
 
 # Inicializa clientes para o Firestore
 firestore_client = firestore.Client()
